@@ -1,3 +1,4 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { getChampion, roundTitles } from '../lib/bracket.js'
 import MatchCard from './MatchCard.jsx'
 
@@ -7,6 +8,22 @@ const COL_GAP = 56
 const ROW_PITCH = 104
 const MIN_BOARD_H = 340
 const PAD = 16
+const MIN_ZOOM = 0.35
+const MAX_ZOOM = 2
+const ZOOM_STEP = 1.15
+
+function clampZoom(value) {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value))
+}
+
+function stagePad(stage) {
+  const styles = getComputedStyle(stage)
+  return {
+    left: parseFloat(styles.paddingLeft) || 0,
+    top: parseFloat(styles.paddingTop) || 0,
+    x: (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0),
+  }
+}
 
 function leafMatches(matches) {
   if (matches.length === 0) return []
@@ -134,8 +151,101 @@ function FinalMark({ champion }) {
 export default function Bracket({ tournament, onName, onWinner }) {
   const champion = getChampion(tournament)
   const byes = tournament.size - tournament.playerCount
+  const isDuo = tournament.size === 2
+  const layout = isDuo ? null : buildLayout(tournament)
+  const stageRef = useRef(null)
+  const sheetRef = useRef(null)
+  const wheelAnchor = useRef(null)
+  const [zoom, setZoom] = useState(1)
+  const [fitWidth, setFitWidth] = useState(true)
+  const [sheetHeight, setSheetHeight] = useState(() => (layout ? layout.boardHeight + 32 : 0))
 
-  if (tournament.size === 2) {
+  useLayoutEffect(() => {
+    if (isDuo) return undefined
+    const sheet = sheetRef.current
+    if (!sheet) return undefined
+    const measure = () => setSheetHeight(sheet.offsetHeight)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(sheet)
+    return () => observer.disconnect()
+  }, [isDuo, layout?.boardHeight, layout?.totalWidth])
+
+  useLayoutEffect(() => {
+    if (isDuo || !fitWidth) return undefined
+    const stage = stageRef.current
+    if (!stage || !layout) return undefined
+    const apply = () => {
+      const available = stage.clientWidth - stagePad(stage).x
+      setZoom(clampZoom(Math.min(1, available / layout.totalWidth)))
+    }
+    apply()
+    const observer = new ResizeObserver(apply)
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [isDuo, fitWidth, layout?.totalWidth])
+
+  useLayoutEffect(() => {
+    const anchor = wheelAnchor.current
+    const stage = stageRef.current
+    if (!anchor || !stage) return
+    stage.scrollLeft = anchor.scrollLeft
+    stage.scrollTop = anchor.scrollTop
+    wheelAnchor.current = null
+  }, [zoom])
+
+  useEffect(() => {
+    if (isDuo) return undefined
+    const stage = stageRef.current
+    if (!stage) return undefined
+
+    function onWheel(event) {
+      if (!event.ctrlKey) return
+      event.preventDefault()
+      const rect = stage.getBoundingClientRect()
+      const pad = stagePad(stage)
+      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY
+      const factor = Math.exp(-delta * 0.0015)
+      setFitWidth(false)
+      setZoom((current) => {
+        const next = clampZoom(current * factor)
+        if (next === current) return current
+        const ratio = next / current
+        const localX = event.clientX - rect.left + stage.scrollLeft - pad.left
+        const localY = event.clientY - rect.top + stage.scrollTop - pad.top
+        wheelAnchor.current = {
+          scrollLeft: pad.left + localX * ratio - (event.clientX - rect.left),
+          scrollTop: pad.top + localY * ratio - (event.clientY - rect.top),
+        }
+        return next
+      })
+    }
+
+    stage.addEventListener('wheel', onWheel, { passive: false })
+    return () => stage.removeEventListener('wheel', onWheel)
+  }, [isDuo])
+
+  function zoomBy(factor) {
+    const stage = stageRef.current
+    setFitWidth(false)
+    setZoom((current) => {
+      const next = clampZoom(current * factor)
+      if (!stage || next === current) return next
+      const pad = stagePad(stage)
+      const ratio = next / current
+      const centerX = stage.clientWidth / 2
+      const centerY = stage.clientHeight / 2
+      const localX = centerX + stage.scrollLeft - pad.left
+      const localY = centerY + stage.scrollTop - pad.top
+      wheelAnchor.current = {
+        scrollLeft: pad.left + localX * ratio - centerX,
+        scrollTop: pad.top + localY * ratio - centerY,
+      }
+      return next
+    })
+  }
+
+  if (isDuo) {
     const finalMatch = tournament.matches[0]
     return (
       <section className="bracket-view">
@@ -153,13 +263,19 @@ export default function Bracket({ tournament, onName, onWinner }) {
     )
   }
 
-  const layout = buildLayout(tournament)
-
   return (
     <section className="bracket-view">
       <BracketIntro playerCount={tournament.playerCount} size={tournament.size} byes={byes} />
-      <div className="stage">
-        <div className="sheet" style={{ width: layout.totalWidth }}>
+      <div className="stage" ref={stageRef}>
+        <div
+          className="zoom-sizer"
+          style={{ width: layout.totalWidth * zoom, height: sheetHeight * zoom }}
+        >
+          <div
+            className="sheet"
+            ref={sheetRef}
+            style={{ width: layout.totalWidth, transform: `scale(${zoom})` }}
+          >
           <div className="column-labels">
             {layout.columnLabels.map((label) => (
               <span key={`${label.text}-${label.x}`} style={{ left: label.x, width: CARD_W }}>
@@ -202,7 +318,32 @@ export default function Bracket({ tournament, onName, onWinner }) {
               </div>
             ))}
           </div>
+          </div>
         </div>
+      </div>
+      <div className="zoom-bar" role="toolbar" aria-label="Zoom del cuadro">
+        <button
+          className="zoom-btn"
+          type="button"
+          aria-label="Alejar"
+          disabled={zoom <= MIN_ZOOM + 0.001}
+          onClick={() => zoomBy(1 / ZOOM_STEP)}
+        >
+          −
+        </button>
+        <span className="zoom-pct">{Math.round(zoom * 100)}%</span>
+        <button
+          className="zoom-btn"
+          type="button"
+          aria-label="Acercar"
+          disabled={zoom >= MAX_ZOOM - 0.001}
+          onClick={() => zoomBy(ZOOM_STEP)}
+        >
+          +
+        </button>
+        <button className="zoom-fit" type="button" onClick={() => setFitWidth(true)}>
+          Ambos lados
+        </button>
       </div>
     </section>
   )
